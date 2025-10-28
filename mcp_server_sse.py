@@ -14,8 +14,9 @@ from app.rag import rag_answer
 
 load_dotenv()
 
-HOST = os.getenv("MCP_HOST", "127.0.0.1")
-PORT = int(os.getenv("MCP_PORT", "8001"))
+# Render dynamically assigns PORT — fallback to 8001 locally
+HOST = os.getenv("MCP_HOST", "0.0.0.0")  
+PORT = int(os.getenv("PORT", os.getenv("MCP_PORT", "8001")))
 
 mcp = FastMCP("music-rag-sse")
 
@@ -30,7 +31,7 @@ def query_rag(question: str, top_k: int = 12) -> dict:
         return {"answer": ans, "context": ctx_text}
     except Exception as e:
         return {"error": str(e)}
-    
+
 from typing import List, Dict
 import re
 
@@ -52,22 +53,23 @@ def generate_tags(answer: str) -> Dict[str, List[str]]:
     """
     a = (answer or "").lower()
     tags = []
-    # dumb heuristics: year-like pattern and a few moods
-    import re
     year = re.search(r"\b(19|20)\d{2}\b", a)
-    if year: tags.append(year.group(0))
-    for m in ["happy","melancholic","nostalgic","energetic","sad","romantic"]:
-        if m in a: tags.append(m)
-    for g in ["pop","rock","jazz","hip-hop","r&b","electropop","folk","country"]:
-        if g in a and g not in tags: tags.append(g)
+    if year:
+        tags.append(year.group(0))
+    for m in ["happy", "melancholic", "nostalgic", "energetic", "sad", "romantic"]:
+        if m in a:
+            tags.append(m)
+    for g in ["pop", "rock", "jazz", "hip-hop", "r&b", "electropop", "folk", "country"]:
+        if g in a and g not in tags:
+            tags.append(g)
     return {"tags": tags[:3]}
 
 
 # Create a Starlette ASGI app with SSE transport correctly mounted.
-# FastMCP exposes /sse and /messages for you.
 app = mcp.http_app(transport="sse")
 
 if __name__ == "__main__":
-    print(f"SSE: http://{HOST}:{PORT}/sse")
-    print(f"Messages: http://{HOST}:{PORT}/messages/")
+    print(f"✅ Starting MCP server on http://{HOST}:{PORT}")
+    print(f"SSE endpoint: /sse")
+    print(f"Messages endpoint: /messages/")
     uvicorn.run(app, host=HOST, port=PORT)
