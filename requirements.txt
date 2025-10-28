@@ -24,3 +24,4 @@ python-dotenv
 textblob
 langchain
 langchain-community
+fastmcp
