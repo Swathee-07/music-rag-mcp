@@ -1,75 +1,82 @@
-# mcp_server_sse.py
-# SSE/HTTP MCP server that exposes your local RAG as one tool.
+# mcp_server.py — RAG + summarize + general_knowledge_query (LLM with dynamic tags)
+# Groq or OpenAI via OpenAI-compatible Chat Completions; memory-light and SSE-ready.
 
-import os
-import json
-from typing import List
-from dotenv import load_dotenv
-
-from fastmcp import FastMCP  # built-in HTTP/SSE app
+import os, re, json
+from typing import List, Dict
+from fastmcp import FastMCP
 import uvicorn
+import requests
 
-# Your local RAG (must return (answer, context_list))
-from app.rag import rag_answer
-
-load_dotenv()
-
-# Render dynamically assigns PORT — fallback to 8001 locally
-HOST = os.getenv("MCP_HOST", "0.0.0.0")  
+HOST = os.getenv("MCP_HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", os.getenv("MCP_PORT", "8001")))
+
+# LLM provider: prefer Groq if GROQ_API_KEY is set (OpenAI-compatible endpoint), else OpenAI
+OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
+GROQ_KEY   = os.getenv("GROQ_API_KEY", "")
+GROQ_BASE  = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")  # Groq OpenAI-compatible base
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+def _chat_json(prompt: str, max_tokens: int = 220, want_json: bool = True) -> str:
+    if GROQ_KEY:
+        url = f"{GROQ_BASE}/chat/completions"
+        headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
+        body = {"model": GROQ_MODEL, "messages":[{"role":"user","content":prompt}], "max_tokens": max_tokens}
+    else:
+        url = "https://api.groq.com/openai/v1"
+        headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
+        body = {"model": OPENAI_MODEL, "messages":[{"role":"user","content":prompt}], "max_tokens": max_tokens}
+    if want_json:
+        body["response_format"] = {"type":"json_object"}
+    r = requests.post(url, headers=headers, json=body, timeout=12)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
 
 mcp = FastMCP("music-rag-sse")
 
 @mcp.tool()
 def query_rag(question: str, top_k: int = 12) -> dict:
-    """
-    Wrap local RAG and return JSON payload with answer + context.
-    """
+    from app.rag import rag_answer  # lazy import to minimize boot RAM
     try:
         ans, ctx = rag_answer(question, return_context=True)
-        ctx_text: List[str] = [str(c) for c in (ctx or [])][:top_k]
-        return {"answer": ans, "context": ctx_text}
+        return {"answer": ans, "context": [str(c) for c in (ctx or [])][:top_k]}
     except Exception as e:
         return {"error": str(e)}
 
-from typing import List, Dict
-import re
-
 @mcp.tool()
 def summarize_context(context: List[str], max_sentences: int = 3) -> Dict[str, str]:
-    """
-    Summarizes the retrieved context into a short paragraph.
-    """
     text = " ".join((context or [])[:3])
-    # very light heuristic summarizer
-    sentences = [s.strip() for s in re.split(r"[.!?]\s+", text) if s.strip()]
-    summary = ". ".join(sentences[:max_sentences])
-    return {"summary": summary}
+    sents = [s.strip() for s in re.split(r"[.!?]\s+", text) if s.strip()]
+    return {"summary": ". ".join(sents[:max_sentences])}
 
 @mcp.tool()
-def generate_tags(answer: str) -> Dict[str, List[str]]:
+def general_knowledge_query(query: str, max_tokens: int = 220) -> Dict[str, object]:
     """
-    Extract 2-3 tags (artist, mood, year-like tokens) from the answer.
+    LLM-only answerer for non-RAG questions; returns dynamic tags from the LLM.
+    Never mixes RAG context to avoid implied citations.
     """
-    a = (answer or "").lower()
-    tags = []
-    year = re.search(r"\b(19|20)\d{2}\b", a)
-    if year:
-        tags.append(year.group(0))
-    for m in ["happy", "melancholic", "nostalgic", "energetic", "sad", "romantic"]:
-        if m in a:
-            tags.append(m)
-    for g in ["pop", "rock", "jazz", "hip-hop", "r&b", "electropop", "folk", "country"]:
-        if g in a and g not in tags:
-            tags.append(g)
-    return {"tags": tags[:3]}
+    # If no provider keys, refuse gracefully
+    if not (GROQ_KEY or OPENAI_KEY):
+        return {"answer": "General knowledge answering is unavailable (no LLM key configured).", "tags": []}
+    try:
+        prompt = (
+            "You are a knowledge agent. Answer the question clearly and concisely, then output 2–4 short topic tags. "
+            "Respond strictly as JSON like {\"answer\":\"...\",\"tags\":[\"tag1\",\"tag2\"]}.\n\n"
+            f"Question: {query}"
+        )
+        txt = _chat_json(prompt, max_tokens=max_tokens, want_json=True)
+        js = json.loads(txt)
+        ans = (js.get("answer") or "").strip()
+        tags = js.get("tags") or []
+        # Sanity bounds
+        if not isinstance(tags, list):
+            tags = [str(tags)]
+        return {"query": query, "answer": ans, "tags": [str(t)[:40] for t in tags][:4]}
+    except Exception as e:
+        return {"query": query, "answer": f"LLM answering failed: {e}", "tags": []}
 
-
-# Create a Starlette ASGI app with SSE transport correctly mounted.
+# Build ASGI app after registering tools
 app = mcp.http_app(transport="sse")
 
 if __name__ == "__main__":
-    print(f"✅ Starting MCP server on http://{HOST}:{PORT}")
-    print(f"SSE endpoint: /sse")
-    print(f"Messages endpoint: /messages/")
     uvicorn.run(app, host=HOST, port=PORT)

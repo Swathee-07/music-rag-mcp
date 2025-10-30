@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    environment:
+      - MCP_SERVER_URL=http://mcpserver:8001/sse
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - FEEDBACK_TO=${FEEDBACK_TO:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+    ports:
+      - "8501:8501"
+    depends_on:
+      - mcpserver
+
+  mcpserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    environment:
+      - PORT=8001
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+    ports:
+      - "8001:8001"
