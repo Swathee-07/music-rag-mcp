@@ -1,5 +1,6 @@
 # app/rag.py
-# RAG core with safe MCP stubs, memory, retrieval, re-ranking, and Groq chat completion.
+# Pure RAG core: memory, retrieval, reranking, and Groq chat completion.
+# Removed local MCP-awareness (album_facts, mcp_document_search, tool snippets).
 
 import os
 import time
@@ -83,8 +84,12 @@ SUMMARY:
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": MODEL_NAME, "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 220, "temperature": 0.1},
+            json={
+                "model": MODEL_NAME,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 220,
+                "temperature": 0.1,
+            },
             timeout=30,
         )
         resp.raise_for_status()
@@ -93,61 +98,8 @@ SUMMARY:
     except Exception:
         pass
 
-# ---------- Optional MCP “awareness” ----------
-_MCP_TOOLS = [
-    {"name": "album_facts", "desc": "Concise album facts from a local/remote knowledge store."},
-    {"name": "critic_styles", "desc": "Common critic adjectives and genre descriptors in reviews."},
-    {"name": "chart_trivia", "desc": "Chart performance tidbits like peaks and certifications."},
-]
-
-def _cos(a, b):
-    da = math.sqrt(sum(x*x for x in a)) or 1.0
-    db = math.sqrt(sum(x*x for x in b)) or 1.0
-    return sum(x*y for x, y in zip(a, b)) / (da * db)
-
-def _select_mcp_tools(embedder, query: str, top_k: int = 2):
-    qv = embedder.encode([query])[0].tolist()
-    scored = []
-    for t in _MCP_TOOLS:
-        tv = embedder.encode([t["desc"]])[0].tolist()
-        scored.append((_cos(qv, tv), t))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [t for _, t in scored[:max(1, min(top_k, len(scored)))]]
-
-def _build_mcp_tools_block(embedder, query: str, top_k: int = 2) -> str:
-    picks = _select_mcp_tools(embedder, query, top_k=top_k)
-    if not picks:
-        return ""
-    lines = ["MCP-TOOLS:"]
-    for t in picks:
-        lines.append(f"- {t['name']}: {t['desc']}")
-    return "\n".join(lines)
-
-def _mcp_enabled() -> bool:
-    return st.session_state.get("mcp_status") == "connected"
-
-# Safe stubs so undefined helpers never crash the pipeline
-if "mcp_document_search" not in globals():
-    def mcp_document_search(*args, **kwargs):
-        return []
-if "mcp_album_facts" not in globals():
-    def mcp_album_facts(*args, **kwargs):
-        return ""
-
-def _maybe_call_mcp_tool(user_query: str) -> str:
-    if not _mcp_enabled():
-        return ""
-    q = user_query.lower()
-    if "album" in q or "release" in q or "award" in q:
-        m = re.search(r"'([^']+)'|\"([^\"]+)\"", user_query)
-        album = (m.group(1) or m.group(2)) if m else ""
-        facts = mcp_album_facts(album) if album else ""
-        if facts and facts.strip() and "No facts found" not in facts:
-            return f"[TOOL album_facts] {facts.strip()}"
-    return ""
-
 # ---------- Prompt builder ----------
-def _build_mcp_prompt(user_query: str, context_chunks: List[str], mode: str):
+def _build_prompt(user_query: str, context_chunks: List[str], mode: str):
     _ensure_memory()
     _summarize_memory_if_needed()
 
@@ -168,12 +120,6 @@ def _build_mcp_prompt(user_query: str, context_chunks: List[str], mode: str):
 
     text_block = "\n\n".join(context_chunks)
     mode_line = "You are a music expert." if mode == "Role-Based Answering (Advanced)" else "Direct answering."
-
-    embedder = get_embedding_model()
-    if _mcp_enabled():
-        tools_block = _build_mcp_tools_block(embedder, user_query, top_k=2)
-        if tools_block:
-            system_msg = f"{system_msg}\n\n{tools_block}"
 
     user_body = f"""
 {mode_line}
@@ -199,20 +145,23 @@ ANSWER (copy one sentence from TEXT or say 'No answer found in dataset.'):
     ]
 
 # ---------- RAG main ----------
-def rag_answer(user_query: str, return_context: bool = False,
-               prompt_mode: str = "Direct Answering (Standard RAG)"):
+def rag_answer(
+    user_query: str,
+    return_context: bool = False,
+    prompt_mode: str = "Direct Answering (Standard RAG)",
+):
     context_chunks: List[str] = []
     answer = "Error: Could not process query."
     lc_history = StreamlitChatMessageHistory(key=LC_HISTORY_KEY)
 
     try:
-        # Meta intent: previous question (skip meta queries)
+        # Meta intent: previous question
         q_norm = user_query.strip()
         if _is_prev_question_query(q_norm):
             prev_q = _last_non_meta_question()
             return ((prev_q or "No previous question found."), []) if return_context else (prev_q or "No previous question found.")
 
-        # Pacing
+        # Simple pacing
         if hasattr(st.session_state, "last_api_call"):
             wait = 1.5 - (time.time() - st.session_state.last_api_call)
             if wait > 0:
@@ -222,24 +171,8 @@ def rag_answer(user_query: str, return_context: bool = False,
         embedder = get_embedding_model()
         q_vec = embedder.encode([user_query])[0].tolist()
 
-        # Retrieval via MCP (stub) then fallback to local Chroma
-        raw_chunks: List[Any] = []
-        if _mcp_enabled():
-            try:
-                mcp_res = mcp_document_search(q_vec, top_k=12) or []
-                docs = mcp_res.get("documents", []) if isinstance(mcp_res, dict) else mcp_res
-                for chunk in docs:
-                    if isinstance(chunk, dict):
-                        txt = chunk.get("text", "")
-                    else:
-                        txt = str(chunk)
-                    if txt:
-                        raw_chunks.append({"text": txt})
-            except Exception:
-                raw_chunks = []
-
-        if not raw_chunks:
-            raw_chunks = query_db(q_vec, top_k=25) or []
+        # Retrieval (local ChromaDB)
+        raw_chunks: List[Any] = query_db(q_vec, top_k=25) or []
 
         # Normalize
         norm_chunks: List[Dict[str, str]] = []
@@ -255,16 +188,10 @@ def rag_answer(user_query: str, return_context: bool = False,
         scores = reranker.predict(pairs)
         ranked = [ch for _, ch in sorted(zip(scores, norm_chunks), key=lambda z: z[0], reverse=True)]
         top_contexts = ranked[:12]
+        context_chunks = [c["text"] for c in top_contexts]
 
-        # Optional tool augmentation
-        tool_snippet = _maybe_call_mcp_tool(user_query)
-        if tool_snippet:
-            context_chunks = [tool_snippet] + [c["text"] for c in top_contexts]
-        else:
-            context_chunks = [c["text"] for c in top_contexts]
-
-        # Prompt + LLM
-        messages = _build_mcp_prompt(user_query, context_chunks, prompt_mode)
+        # Prompt + LLM (Groq OpenAI-compatible)
+        messages = _build_prompt(user_query, context_chunks, prompt_mode)
         api_url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         payload = {"model": MODEL_NAME, "messages": messages, "max_tokens": 120, "temperature": 0.0}
@@ -289,6 +216,7 @@ def rag_answer(user_query: str, return_context: bool = False,
                     raw = data["choices"][0]["message"]["content"].strip()
                     answer = clean_answer(raw)
                     if answer == "No answer found in dataset.":
+                        # fallback: surface one of the most relevant sentences
                         for ch in context_chunks:
                             if any(word.lower() in ch.lower() for word in user_query.split()):
                                 candidate = ch.strip()
