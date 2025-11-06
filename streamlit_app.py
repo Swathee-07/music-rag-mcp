@@ -20,9 +20,6 @@ import re  # for first_float
 from collections import Counter
 import math
 
-MCP_SERVER_URL = st.secrets.get("MCP_SERVER_URL", "http://127.0.0.1:8001/sse")
-
-
 # ---------- Agent layer (SSE) ----------
 # Guarded import prevents hard failures if agents.py is missing some symbol.
 try:
@@ -83,10 +80,10 @@ if "sidebar_open" not in st.session_state: st.session_state.sidebar_open = True
 if "mcp_status" not in st.session_state: st.session_state.mcp_status = "disconnected"  # connected/disconnected/error
 if "mcp_server_path" not in st.session_state: st.session_state.mcp_server_path = ""    # retained for compatibility
 if "mcp_client" not in st.session_state: st.session_state.mcp_client = None           # store only URL wrapper, not a live session
-if "mcp_server_url" not in st.session_state: st.session_state.mcp_server_url = st.secrets.get("MCP_SERVER_URL", "http://127.0.0.1:8001/sse")
-if "feedback_recipient" not in st.session_state: st.session_state.feedback_recipient = st.secrets.get("FEEDBACK_TO", "")
-if "smtp_user" not in st.session_state: st.session_state.smtp_user = st.secrets.get("SMTP_USER", "")
-if "smtp_pass" not in st.session_state: st.session_state.smtp_pass = st.secrets.get("SMTP_PASS", "")
+if "mcp_server_url" not in st.session_state: st.session_state.mcp_server_url = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8001/sse")
+if "feedback_recipient" not in st.session_state: st.session_state.feedback_recipient = os.getenv("FEEDBACK_TO", "")
+if "smtp_user" not in st.session_state: st.session_state.smtp_user = os.getenv("SMTP_USER", "")
+if "smtp_pass" not in st.session_state: st.session_state.smtp_pass = os.getenv("SMTP_PASS", "")
 if "mcp_tools" not in st.session_state: st.session_state.mcp_tools = []
 if "mcp_autotry_hash" not in st.session_state: st.session_state.mcp_autotry_hash = ""
 
@@ -336,8 +333,8 @@ def compute_metrics_with_fallback(q_raw: str, ans: str):
 
 # ---------- Email ----------
 def send_email(recipient: str, subject: str, body: str):
-    user = st.session_state.smtp_user or st.secrets.get("SMTP_USER", "")
-    pwd  = st.session_state.smtp_pass or st.secrets.get("SMTP_PASS", "")
+    user = st.session_state.smtp_user or os.getenv("SMTP_USER", "")
+    pwd  = st.session_state.smtp_pass or os.getenv("SMTP_PASS", "")
     if not (user and pwd and recipient):
         return False, "Missing SMTP credentials or recipient"
     msg = MIMEText(body, "plain", "utf-8")
@@ -446,7 +443,7 @@ def sidebar_body():
 
     st.divider()
     st.markdown("#### MCP")
-    st.text_input("MCP Server URL", key="mcp_server_url",value=st.secrets.get("MCP_SERVER_URL", "http://127.0.0.1:8001/sse"))
+    st.text_input("MCP Server URL", key="mcp_server_url", placeholder="http://127.0.0.1:8001/sse")
 
     # Auto-connect silently and show read-only pill (no buttons). [web:395]
     cur_hash = f"{st.session_state.mcp_server_url}"

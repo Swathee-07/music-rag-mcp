@@ -3,3 +3,14 @@ uvicorn[standard]>=0.30
 requests>=2.32
 python-dotenv>=1.0
 fastapi
+
+# Added shared RAG deps
+streamlit
+sentence-transformers
+scikit-learn
+pandas
+numpy
+chromadb
+langchain
+langchain-community
+torch
