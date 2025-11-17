@@ -1,7 +1,6 @@
-
-
 services:
   streamlit:
+    image: yourorg/streamlit-app:latest
     build:
       context: .
       dockerfile: Dockerfile.app
@@ -18,6 +17,7 @@ services:
       - mcpserver
 
   mcpserver:
+    image: yourorg/mcp-server:latest
     build:
       context: .
       dockerfile: Dockerfile.mcp

@@ -1,16 +1,50 @@
-FROM python:3.11-slim
+# syntax=docker/dockerfile:1.7-labs
+
+# Stage 1: Base system (shared)
+FROM python:3.11-slim-bookworm AS base
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /install
+
+# Reuse apt cache between builds
+RUN --mount=type=cache,target=/var/cache/apt \
+    --mount=type=cache,target=/var/lib/apt \
+    apt-get update && \
+    apt-get install -y --no-install-recommends build-essential curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Stage 2: Dependency install (cached)
+FROM base AS deps
+COPY requirements.txt .
+# Keep pip cache via BuildKit; do not rm a mounted path
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip wheel setuptools && \
+    pip install --prefix /install torch==2.2.2+cpu --index-url https://download.pytorch.org/whl/cpu
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --prefix /install -r requirements.txt --prefer-binary
+
+# Stage 3: Parallel “fetch” stage (independent)
+FROM python:3.11-slim-bookworm AS fetch
+WORKDIR /tmp/fetch
+# Dummy independent work that BuildKit overlaps with deps
+RUN --mount=type=cache,target=/tmp/cache \
+    echo "Downloading small assets..." && \
+    sleep 3 && \
+    echo "Fetch done"
+
+# Stage 4: Final runtime
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 
-# Install system deps that speed up builds (optional but helpful)
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+# Copy installed deps + fetched files
+COPY --from=deps /install /usr/local
+COPY --from=fetch /tmp/fetch /assets
 
-COPY requirements-mcp.txt ./requirements-mcp.txt
-RUN pip install --no-cache-dir -r requirements-mcp.txt
-
+# App code copied last so code edits don’t invalidate deps
 COPY . .
 
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8001
 EXPOSE 8001
-
-CMD ["uvicorn", "mcp_server:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
+CMD ["uvicorn","mcp_server:app","--host","0.0.0.0","--port","8001"]
